@@ -9,13 +9,21 @@ import (
 	"github.com/joneskadomoto-sbt/go-cache/internal/resp"
 )
 
+type handlerFunc func(args []string, w *resp.Writer)
+
 type Server struct {
-	addr   string
-	logger *slog.Logger
+	addr     string
+	logger   *slog.Logger
+	commands map[string]handlerFunc
 }
 
 func New(addr string, logger *slog.Logger) *Server {
-	return &Server{addr: addr, logger: logger}
+	s := &Server{addr: addr, logger: logger}
+	s.commands = map[string]handlerFunc{
+		"PING": s.cmdPing,
+		"ECHO": s.cmdEcho,
+	}
+	return s
 }
 
 func (s *Server) ListenAndServe() error {
@@ -47,13 +55,19 @@ func (s *Server) handleConn(conn net.Conn) {
 	s.logger.Info("cliente conectado", "remote", remote)
 
 	reader := resp.NewReader(conn)
+	writer := resp.NewWriter(conn)
+
 	for {
 		value, err := reader.Read()
 		if err != nil {
 			if errors.Is(err, io.EOF) {
 				s.logger.Info("cliente desconectado", "remote", remote)
-			} else {
-				s.logger.Error("erro lendo comando", "remote", remote, "err", err)
+				return
+			}
+			s.logger.Error("erro lendo comando", "remote", remote, "err", err)
+			if errors.Is(err, resp.ErrProtocol) {
+				writer.WriteError("ERR " + err.Error())
+				writer.Flush()
 			}
 			return
 		}
@@ -61,9 +75,17 @@ func (s *Server) handleConn(conn net.Conn) {
 		args, err := value.Args()
 		if err != nil {
 			s.logger.Error("comando inválido", "remote", remote, "err", err)
+			writer.WriteError("ERR " + err.Error())
+			writer.Flush()
 			return
 		}
 
-		s.logger.Info("comando recebido", "remote", remote, "args", args)
+		s.logger.Debug("comando recebido", "remote", remote, "args", args)
+		s.dispatch(args, writer)
+
+		if err := writer.Flush(); err != nil {
+			s.logger.Error("erro ao enviar resposta", "remote", remote, "err", err)
+			return
+		}
 	}
 }
